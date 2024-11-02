@@ -144,11 +144,12 @@ class HackerrankLeaderboard:
         return progress_window, progress_text, progress
 
     def generateExcelSheet(self, name, df):
+        # This method now only handles the total leaderboard
+        if name != 'TotalHackerrankLeaderBoard':
+            return
+
         # Sort the DataFrame
-        if name == 'TotalHackerrankLeaderBoard' or name == 'CombinedLeaderboard':
-            df = df.sort_values(by='Total Score', ascending=False)
-        else:
-            df = df.sort_values(by='Score', ascending=False)
+        df = df.sort_values(by='Total Score', ascending=False)
 
         # Add rank after sorting
         df.insert(0, 'Rank', range(1, len(df) + 1))
@@ -240,32 +241,43 @@ class HackerrankLeaderboard:
             all_participants = {}
             total_sheets = len(tracker_names)
 
-            for idx, tracker_name in enumerate(tracker_names, 1):
-                df = self.fetch_hackerrank_data(tracker_name)
-                if df is None:
-                    continue
+            # Create a single workbook for all contest sheets
+            contests_filepath = Path('Leaderboards/ContestLeaderboards.xlsx')
+            with pd.ExcelWriter(contests_filepath, engine='openpyxl') as writer:
+                for idx, tracker_name in enumerate(tracker_names, 1):
+                    df = self.fetch_hackerrank_data(tracker_name)
+                    if df is None:
+                        continue
 
-                if df.empty:
-                    messagebox.showinfo("Warning", f"{tracker_name} returned no data")
-                    continue
+                    if df.empty:
+                        messagebox.showinfo("Warning", f"{tracker_name} returned no data")
+                        continue
 
-                # Update all_participants dictionary
-                for _, row in df.iterrows():
-                    if row['Name'] not in all_participants:
-                        all_participants[row['Name']] = {contest: 0 for contest in tracker_names}
-                    all_participants[row['Name']][tracker_name] = row['Score']
+                    # Update all_participants dictionary
+                    for _, row in df.iterrows():
+                        if row['Name'] not in all_participants:
+                            all_participants[row['Name']] = {contest: 0 for contest in tracker_names}
+                        all_participants[row['Name']][tracker_name] = row['Score']
 
-                self.generateExcelSheet(tracker_name, df)
+                    # Sort the DataFrame
+                    df = df.sort_values(by='Score', ascending=False)
+                    # Add rank after sorting
+                    df.insert(0, 'Rank', range(1, len(df) + 1))
 
-                # Update progress
-                self.update_progress(progress_window, progress_text, progress,
-                                     f'\nFinished {tracker_name}!\n',
-                                     int(idx / total_sheets * 100))
+                    # Write to the Excel file
+                    df.to_excel(writer, sheet_name=tracker_name[:31],
+                                index=False)  # Excel sheet names limited to 31 chars
+                    self.apply_excel_formatting(writer.sheets[tracker_name[:31]], df)
 
-            # Generate total leaderboard
-            if all_participants:
-                self.generate_total_leaderboard(all_participants, tracker_names)
-                messagebox.showinfo("Success", "Sheets generated successfully.")
+                    # Update progress
+                    self.update_progress(progress_window, progress_text, progress,
+                                         f'\nFinished {tracker_name}!\n',
+                                         int(idx / total_sheets * 100))
+
+                # Generate total leaderboard in a separate file
+                if all_participants:
+                    self.generate_total_leaderboard(all_participants, tracker_names)
+                    messagebox.showinfo("Success", "Sheets generated successfully.")
 
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred: {str(e)}")
@@ -331,7 +343,6 @@ class HackerrankLeaderboard:
             self.update_progress(progress_window, progress_text, progress, "Reading student data file...\n", 25)
             student_df = pd.read_excel(student_file)
             student_df = student_df[['Roll number', 'Hackerrank']].copy()
-
             student_df['Hackerrank'] = student_df['Hackerrank'].str.strip().str.lstrip('@').str.lower()
 
             # Read Hackerrank leaderboard file
@@ -339,53 +350,79 @@ class HackerrankLeaderboard:
                                  50)
             hackerrank_df = pd.read_excel(hackerrank_file)
 
-            # If there's a Rank column, drop it (we'll recreate it)
-            if 'Rank' in hackerrank_df.columns:
-                hackerrank_df = hackerrank_df.drop('Rank', axis=1)
+            # Drop existing Rank and Total Score columns if they exist
+            columns_to_drop = ['Rank', 'Total Score']
+            hackerrank_df = hackerrank_df.drop(columns=[col for col in columns_to_drop if col in hackerrank_df.columns])
 
             # Clean data and convert to lowercase for matching
             self.update_progress(progress_window, progress_text, progress, "Processing data...\n", 75)
             student_df['Hackerrank'] = student_df['Hackerrank'].str.strip()
-            hackerrank_df['Name_lower'] = hackerrank_df['Name'].str.strip().str.lower()
+            hackerrank_df['Name'] = hackerrank_df['Name'].str.strip()
+            hackerrank_df['Name_lower'] = hackerrank_df['Name'].str.lower()
 
-            # Merge dataframes using lowercase versions for matching
-            result_df = pd.merge(
-                hackerrank_df,
-                student_df,
-                left_on='Name_lower',
-                right_on='Hackerrank',
-                how='left'
-            )
+            # Get score columns
+            score_columns = [col for col in hackerrank_df.columns
+                             if col not in ['Name', 'Name_lower', 'Rank', 'Total Score']]
 
-            # Drop the temporary and redundant columns
-            result_df = result_df.drop(['Hackerrank', 'Name_lower'], axis=1)
+            # Create matched sheet
+            # First, create a DataFrame with all students and zero scores
+            matched_df = student_df.copy()
+            matched_df['Name'] = ''  # Empty column for Hackerrank names
+            for col in score_columns:
+                matched_df[col] = 0
 
-            # Sort by Total Score if it exists, otherwise by Score
-            sort_column = 'Total Score' if 'Total Score' in result_df.columns else 'Score'
-            result_df = result_df.sort_values(sort_column, ascending=False)
+            # Update scores for matched students
+            for idx, student in matched_df.iterrows():
+                match = hackerrank_df[hackerrank_df['Name_lower'] == student['Hackerrank']]
+                if not match.empty:
+                    matched_df.at[idx, 'Name'] = match.iloc[0]['Name']  # Use actual Hackerrank name
+                    for col in score_columns:
+                        matched_df.at[idx, col] = match.iloc[0][col]
 
-            # Add Rank column and reorder columns
-            result_df.insert(0, 'Rank', range(1, len(result_df) + 1))
+            # Calculate total score for matched entries
+            matched_df['Total Score'] = matched_df[score_columns].sum(axis=1)
+            matched_df = matched_df.sort_values('Total Score', ascending=False)
+            matched_df.insert(0, 'Rank', range(1, len(matched_df) + 1))
 
-            # Reorder columns to have Rank, Roll number, Name at the start
-            cols = result_df.columns.tolist()
-            cols.remove('Rank')
-            cols.remove('Roll number')
-            cols.remove('Name')
-            final_cols = ['Rank', 'Roll number', 'Name'] + cols
-            result_df = result_df[final_cols]
+            # Create unmatched sheet
+            # Get all Hackerrank usernames that weren't matched
+            matched_usernames = matched_df[matched_df['Name'] != '']['Name'].str.lower()
+            unmatched_hackerrank = hackerrank_df[~hackerrank_df['Name_lower'].isin(matched_usernames)].copy()
+
+            # Prepare unmatched DataFrame
+            unmatched_df = unmatched_hackerrank.drop('Name_lower', axis=1)
+            unmatched_df['Roll number'] = ''  # Empty roll number for unmatched Hackerrank users
+            unmatched_df['Total Score'] = unmatched_df[score_columns].sum(axis=1)
+            unmatched_df = unmatched_df.sort_values('Total Score', ascending=False)
+            unmatched_df.insert(0, 'Rank', range(1, len(unmatched_df) + 1))
+
+            # Reorder columns for both dataframes
+            final_cols = ['Rank', 'Roll number', 'Name'] + score_columns + ['Total Score']
+            matched_df = matched_df[final_cols]
+            unmatched_df = unmatched_df[final_cols]
 
             # Generate Excel file
             self.update_progress(progress_window, progress_text, progress, "Generating Excel file...\n", 90)
             with pd.ExcelWriter('Leaderboards/CombinedLeaderboard.xlsx', engine='openpyxl') as writer:
-                result_df.to_excel(writer, index=False, sheet_name='Sheet1')
-                self.apply_excel_formatting(writer.sheets['Sheet1'], result_df)
+                matched_df.to_excel(writer, index=False, sheet_name='Matched Entries')
+                self.apply_excel_formatting(writer.sheets['Matched Entries'], matched_df)
+
+                unmatched_df.to_excel(writer, index=False, sheet_name='Unmatched Entries')
+                self.apply_excel_formatting(writer.sheets['Unmatched Entries'], unmatched_df)
+
+            # Prepare summary message
+            students_with_scores = len(matched_df[matched_df['Name'] != ''])
+            students_without_scores = len(matched_df[matched_df['Name'] == ''])
+            unmatched_hackerrank_users = len(unmatched_df)
 
             messagebox.showinfo("Success",
-                                f"Excel sheet generated successfully!\n"
-                                f"Total entries: {len(result_df)}\n"
-                                f"Matched entries (with Roll numbers): {result_df['Roll number'].notna().sum()}\n"
-                                f"Unmatched entries: {result_df['Roll number'].isna().sum()}")
+                                f"Excel sheets generated successfully!\n\n"
+                                f"Matched Entries Sheet:\n"
+                                f"- Students with scores: {students_with_scores}\n"
+                                f"- Students without participation: {students_without_scores}\n\n"
+                                f"Unmatched Entries Sheet:\n"
+                                f"- Unmatched Hackerrank users: {unmatched_hackerrank_users}\n\n"
+                                f"Check both sheets in CombinedLeaderboard.xlsx")
 
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred: {str(e)}")
